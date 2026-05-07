@@ -37,18 +37,21 @@ credentials = {
     "apikey": IBM_API_KEY
 }
 
-generate_params = {
-    GenParams.MAX_NEW_TOKENS: 300,
-    GenParams.TEMPERATURE: 0.7,
-    GenParams.TOP_P: 1.0,
+
+PLANNER_PARAMS = {
+    GenParams.MAX_NEW_TOKENS: 200,
+    GenParams.TEMPERATURE: 0.1,
 }
 
-model = ModelInference(
-    model_id=MODEL_ID,
-    credentials=credentials,
-    project_id=IBM_PROJECT_ID,
-    params=generate_params
-)
+WRITER_PARAMS = {
+    GenParams.MAX_NEW_TOKENS: 500,
+    GenParams.TEMPERATURE: 0.7,
+}
+
+RESEARCHER_PARAMS = {
+    GenParams.MAX_NEW_TOKENS: 200,
+    GenParams.TEMPERATURE: 0.3,
+}
 
 def validate_input(user_input: str) -> tuple[bool, str]:
     """Basic checks + tries to catch prompt injection."""
@@ -66,8 +69,6 @@ def validate_input(user_input: str) -> tuple[bool, str]:
         r'(?i)(system|admin|root|god)\s+(mode|access|privileges)',
         r'(?i)(execute|run|eval)\s+(this|the)\s+(code|command|script)',
         r'(?i)(<\?php|<script|javascript:|data:)',
-        r'(?i)(class|def|function)\s+\w+\s*\(',
-        r'(?i)(import|from)\s+\w+',
         r'(?i)(__import__|eval|exec|open|file)\s*\(',
     ]
    
@@ -106,50 +107,45 @@ def rate_limit_check(client_ip: str) -> tuple[bool, str, bool]:
 
 
 def sanitize_response(response: str) -> str:
-    """Prevent XSS, possible code execution, and keep responses from getting too long."""    
- 
     text = str(response)
-   
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = html.escape(text, quote=True)    
 
     # Remove null bytes
     text = text.replace("\x00", "")
-    
-    # Keep responses under 2100 chars (arbitrary limit)
+
     max_len = 2100
+
     if len(text) > max_len:
-        cut = text[:max_len]
-        # Try to cut at a period so dont cut off a sentence if goes over limit
-        if "." in cut:
-            cut = cut.rsplit(".", 1)[0] + "."
-        else:
-            last_space = cut.rfind(' ')
-            if last_space > 0:
-                cut = cut[:last_space]
-        text = cut + "\n\n[Response was truncated due to exceeding length limit]"
-    
+        text = text[:max_len] + "\n\n[Response truncated]"
+
     return text.strip()
 
-def call_llm(system_prompt: str, user_content: str) -> str:
+def call_llm(system_prompt: str, user_content: str, params:dict=None, sanitize=True) -> str:
     try:
-        sanitized_system = sanitize_response(system_prompt)
-        sanitized_user = sanitize_response(user_content)
-       
-        full_prompt = sanitized_system + "\n\nUser request: " + sanitized_user + "\n\nResponse:"
-       
+        model = ModelInference(
+            model_id=MODEL_ID,
+            credentials=credentials,
+            project_id=IBM_PROJECT_ID,
+            params=params
+        )
+
+        full_prompt = system_prompt + "\n\nUser request: " + user_content + "\n\nResponse:"
+
         logger.info(f"LLM call initiated - Prompt length: {len(full_prompt)}")
-       
+
         response = model.generate_text(prompt=full_prompt)
-        sanitized_response = sanitize_response(response.strip())
-       
-        logger.info(f"LLM call completed - Response length: {len(sanitized_response)}")
-       
-        return sanitized_response
+
+        response = response.strip()
+
+        if sanitize:
+            response = sanitize_response(response)
+
+        logger.info(f"LLM call completed - Response length: {len(response)}")
+
+        return response
+
     except Exception as e:
         logger.error(f"LLM call failed: {str(e)}")
         raise
-
 def is_safe_query(user_query: str) -> tuple[bool, str]:
     """LLM decides if query is safe or violtes any policy/guidelines"""
 
@@ -171,27 +167,23 @@ def is_safe_query(user_query: str) -> tuple[bool, str]:
         return False, "Query blocked: does not comply with content policy"
     return True, "Query is safe"
 
-def get_json_from_response(response_text: str) -> str:
-    """
-    Extract JSON from LLM response that may contain markdown
-    """
-    match = re.search(r'(\[.*\]|\{.*\})', response_text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return response_text
-
 def planner_agent(user_query: str) -> list:
     """
     Break down the user's request into a JSON list of subtasks
     """
     system_prompt = '''
+    You are a planner agent.
     You are a Planner Agent. Break the user's request into a JSON list of subtasks.
     Output ONLY valid JSON, like ["task1", "task2"]. Do not include any other text or explanation.
+
+    Minimum of 2 subtasks required. If it is a simple query then can still still breakdown into
+    fundamental subtasks like "What is X?", "Why is X important?", "Who created X?", etc.
     '''
-    response = call_llm(system_prompt, user_query)
-    cleaned_response = get_json_from_response(response)
+
+    response = call_llm(system_prompt, user_query, PLANNER_PARAMS, sanitize=False)
+    logging.info(f"Planner response: {response}")
     try:
-        return json.loads(cleaned_response)
+        return json.loads(response)
     except json.JSONDecodeError:
         #Fallback to treat the whole thing as one task
         logging.warning(f"Planner output invalid JSON, using fallback. Output was: {response[:200]}")
@@ -203,17 +195,17 @@ def researcher_agent(subtasks: list) -> list:
     # the LLM include sources for transparency and so can be fact checked by the user
     for task in subtasks:
         system_prompt = """
-You are a Researcher Agent. Provide a concise, factual answer (1-2 sentences) to the subtask.
+        You are a Researcher Agent. Provide a concise, factual answer (1-2 sentences) to the subtask.
 
-When possible please include a credible source (website, newspaper, publication, etc.) for each claim, where a user could verify the information.
+        When possible please include a credible source (website, newspaper, publication, etc.) for each claim, where a user could verify the information.
 
-Output JSON with this exact structure:
-{"answer": "The answer to the subtask", "source": "The source of the information"}
-"""
+        Output JSON with this exact structure:
+        {"answer": "The answer to the subtask", "source": "The source of the information"}
+        """
         user_content = "Subtask: " + task
-        response = call_llm(system_prompt, user_content)
+        response = call_llm(system_prompt, user_content, RESEARCHER_PARAMS, sanitize=False)
         try:
-            item = json.loads(get_json_from_response(response))
+            item = json.loads(response)
         except:
             # Fallback if JSON parsing fails
             item = {"answer": response, "source": "LLM (no external source)"}
@@ -230,7 +222,7 @@ def writer_agent(user_query: str, research: list) -> str:
     """
 
     user_content = "Original query: " + user_query + "\n\nResearch with sources:\n" + research_text
-    return call_llm(system_prompt, user_content)
+    return call_llm(system_prompt, user_content, WRITER_PARAMS, sanitize=True)
 
 def orchestrator(user_query: str, request_id: str) -> dict:
     try:
@@ -308,4 +300,4 @@ def health():
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
