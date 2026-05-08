@@ -110,8 +110,9 @@ def sanitize_response(response: str) -> str:
     text = str(response)
 
     # Remove null bytes
-    text = text.replace("\x00", "")
-    
+    text = text.replace("\x00", "")    
+    text = text.replace('\\t', '\t')    
+    text = text.replace('\\r', '\r')    
     text = text.replace('\\n', '\n')
 
     max_len = 2100
@@ -241,7 +242,8 @@ def orchestrator(user_query: str, request_id: str) -> dict:
                
         return {
             "status": "success",
-            "final_report": final_report
+            "final_report": final_report,
+            "research": research
         }
                
     except Exception as e:
