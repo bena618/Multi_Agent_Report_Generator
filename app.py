@@ -110,11 +110,7 @@ def sanitize_response(response: str) -> str:
     text = str(response)
 
     # Remove null bytes
-<<<<<<< HEAD
     text = text.replace("\x00", "")    
-=======
-    text = text.replace("\x00", "")
->>>>>>> 92c02d7317bdbc76a569144ee61b6142b9fab363
     text = text.replace('\\t', '\t')    
     text = text.replace('\\r', '\r')    
     text = text.replace('\\n', '\n')
