@@ -110,11 +110,15 @@ def sanitize_response(response: str) -> str:
     text = str(response)
 
     # Remove null bytes
+<<<<<<< HEAD
     text = text.replace("\x00", "")    
+=======
+    text = text.replace("\x00", "")
+>>>>>>> 92c02d7317bdbc76a569144ee61b6142b9fab363
     text = text.replace('\\t', '\t')    
     text = text.replace('\\r', '\r')    
     text = text.replace('\\n', '\n')
-
+    
     max_len = 2100
 
     if len(text) > max_len:
@@ -229,7 +233,7 @@ def writer_agent(user_query: str, research: list) -> str:
 
 def orchestrator(user_query: str, request_id: str) -> dict:
     try:
-        logger.info(f"[{request_id}] Processing query: {user_query[:100]}...")
+        logger.info(f"[{request_id}] Processing query: {user_query[:20]}...")
        
         subtasks = planner_agent(user_query)
         logger.info(f"[{request_id}] Planner generated {len(subtasks)} subtasks")
@@ -285,7 +289,7 @@ def research():
 
         is_safe, safety_message = is_safe_query(query)
         if not is_safe:
-            logger.warning(f"[{request_id}] Blocking unsafe query: {query[:100]}")
+            logger.warning(f"[{request_id}] Blocking unsafe query: {query[:20]}")
             return jsonify({"error": safety_message}), 400
               
         result = orchestrator(query, request_id)
