@@ -3,5 +3,6 @@ services:
     name: Multi_Agent_Report_Generator
     env: python
     region: oregon
+    runtime: python-3.11.0
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
