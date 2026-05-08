@@ -37,6 +37,20 @@ RESEARCHER_PARAMS = {GenParams.MAX_NEW_TOKENS: 200, GenParams.TEMPERATURE: 0.3}
 class ResearchQuery(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
 
+class SubtaskList(BaseModel):
+    subtasks: list[str] = Field(..., min_items=2)
+
+class ResearchItem(BaseModel):
+    answer: str = Field(...)
+    source: str = Field(...)
+
+class ResearchResult(BaseModel):
+    items: list[ResearchItem] = Field(..., min_items=1)
+
+class FinalReport(BaseModel):
+    report: str
+
+
 def validate_input(user_input: str) -> tuple[bool, str]:
     if not user_input or not user_input.strip():
         return False, "Empty input not allowed"
@@ -117,7 +131,7 @@ def is_safe_query(user_query: str) -> tuple[bool, str]:
         return False, "Query blocked: does not comply with content policy"
     return True, "Query is safe"
 
-def planner_agent(user_query: str) -> list:
+def planner_agent(user_query: str) -> SubtaskList:
     system_prompt = """
     You are a Planner Agent. Break the user's request into a JSON list of subtasks.
     Output ONLY valid JSON, like ["task1", "task2"]. Minimum 2 subtasks.
@@ -125,12 +139,13 @@ def planner_agent(user_query: str) -> list:
     response = call_llm(system_prompt, user_query, PLANNER_PARAMS, sanitize=False)
     logger.info(f"Planner response: {response}")
     try:
-        return json.loads(response)
+        data = json.loads(response)
+        return SubtaskList(subtasks=data)
     except json.JSONDecodeError:
         logger.warning(f"Planner invalid JSON, using fallback: {response[:200]}")
-        return [user_query]
+        return SubtaskList(subtasks=[user_query])
 
-def researcher_agent(subtasks: list) -> list:
+def researcher_agent(subtasks: list) -> ResearchResult:
     results = []
     for task in subtasks:
         system_prompt = """
@@ -140,14 +155,14 @@ def researcher_agent(subtasks: list) -> list:
         user_content = "Subtask: " + task
         response = call_llm(system_prompt, user_content, RESEARCHER_PARAMS, sanitize=False)
         try:
-            item = json.loads(response)
+            item = ResearchItem.model_validate_json(response)
         except:
-            item = {"answer": response, "source": "LLM (no external source)"}
+            item = ResearchItem(answer=response, source="LLM (no external source)")
         results.append(item)
-    return results
+    return ResearchResult(items=results)
 
-def writer_agent(user_query: str, research: list) -> str:
-    research_text = "\n".join([f"{item.get('answer','No answer')} (Source: {item.get('source','Unknown')})" for item in research])
+def writer_agent(user_query: str, research: ResearchResult) -> str:
+    research_text = "\n".join([f"{item.answer} (Source: {item.source})" for item in research.items])
     system_prompt = """
     You are a Report Writer. Synthesize the research into 2-3 paragraphs with inline citations.
     """
@@ -158,12 +173,12 @@ def orchestrator(user_query: str, request_id: str) -> dict:
     try:
         logger.info(f"[{request_id}] Processing query: {user_query[:20]}...")
         subtasks = planner_agent(user_query)
-        logger.info(f"[{request_id}] Planner generated {len(subtasks)} subtasks")
-        research = researcher_agent(subtasks)
-        logger.info(f"[{request_id}] Researcher completed {len(research)} items")
+        logger.info(f"[{request_id}] Planner generated {len(subtasks.subtasks)} subtasks")
+        research = researcher_agent(subtasks.subtasks)
+        logger.info(f"[{request_id}] Researcher completed {len(research.items)} items")
         final_report = writer_agent(user_query, research)
         logger.info(f"[{request_id}] Writer generated report")
-        return {"status": "success", "research": research, "final_report": final_report}
+        return {"status": "success", "research": research.model_dump(), "final_report": final_report}
     except Exception as e:
         logger.error(f"[{request_id}] Orchestration failed: {e}")
         return {"status": "failed", "error": "Something went wrong"}
