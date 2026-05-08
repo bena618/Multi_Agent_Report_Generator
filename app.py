@@ -37,7 +37,6 @@ RESEARCHER_PARAMS = {GenParams.MAX_NEW_TOKENS: 200, GenParams.TEMPERATURE: 0.3}
 class ResearchQuery(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
 
-# ---------- Helper functions (unchanged) ----------
 def validate_input(user_input: str) -> tuple[bool, str]:
     if not user_input or not user_input.strip():
         return False, "Empty input not allowed"
