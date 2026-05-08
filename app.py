@@ -243,7 +243,7 @@ def orchestrator(user_query: str, request_id: str) -> dict:
         return {
             "status": "success",
             "final_report": final_report,
-            "research": research
+            "research": research 
         }
                
     except Exception as e:
