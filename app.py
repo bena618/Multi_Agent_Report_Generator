@@ -229,7 +229,7 @@ def writer_agent(user_query: str, research: list) -> str:
 
 def orchestrator(user_query: str, request_id: str) -> dict:
     try:
-        logger.info(f"[{request_id}] Processing query: {user_query[:100]}...")
+        logger.info(f"[{request_id}] Processing query: {user_query[:20]}...")
        
         subtasks = planner_agent(user_query)
         logger.info(f"[{request_id}] Planner generated {len(subtasks)} subtasks")
@@ -284,7 +284,7 @@ def research():
 
         is_safe, safety_message = is_safe_query(query)
         if not is_safe:
-            logger.warning(f"[{request_id}] Blocking unsafe query: {query[:100]}")
+            logger.warning(f"[{request_id}] Blocking unsafe query: {query[:20]}")
             return jsonify({"error": safety_message}), 400
               
         result = orchestrator(query, request_id)
