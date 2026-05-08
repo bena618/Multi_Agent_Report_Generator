@@ -111,9 +111,9 @@ def sanitize_response(response: str) -> str:
 
     # Remove null bytes
     text = text.replace("\x00", "")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = text.replace('\\t', '\t')    
+    text = text.replace('\\r', '\r')    
+    text = text.replace('\\n', '\n')
     
     max_len = 2100
 
