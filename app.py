@@ -134,7 +134,7 @@ def is_safe_query(user_query: str) -> tuple[bool, str]:
 def planner_agent(user_query: str) -> SubtaskList:
     system_prompt = """
     You are a Planner Agent. Break the user's request into a JSON list of subtasks.
-    Output ONLY valid JSON, like ["task1", "task2"]. Minimum 2 subtasks.
+    Output ONLY valid JSON, like ["task1", "task2"]. Minimum 2 subtasks. Do not introduce any topics tht are not directly related to the user's query in the response.
     """
     response = call_llm(system_prompt, user_query, PLANNER_PARAMS, sanitize=False)
     logger.info(f"Planner response: {response}")
