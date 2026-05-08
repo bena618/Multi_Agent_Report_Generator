@@ -67,7 +67,7 @@ def validate_input(user_input: str) -> tuple[bool, str]:
     for pattern in injection_patterns:
         if re.search(pattern, user_input):
             logger.warning(f"Prompt injection attempt detected: {pattern}")
-            return False, "Invalid input"
+            return False, "Prompt injection attack detected: Request denied"
     return True, "Input validated"
 
 def rate_limit_check(client_ip: str) -> tuple[bool, str, bool]:
@@ -140,10 +140,15 @@ def planner_agent(user_query: str) -> SubtaskList:
     logger.info(f"Planner response: {response}")
     try:
         data = json.loads(response)
+        if not isinstance(data,list) or len(data) < 2:
+            raise PlannerError("Planner did not return at least 2 subtaks")
+            
         return SubtaskList(subtasks=data)
-    except json.JSONDecodeError:
-        logger.warning(f"Planner invalid JSON, using fallback: {response[:200]}")
-        return SubtaskList(subtasks=[user_query])
+    except (json.JSONDecodeError,ValidationError, PlannerError) as e:
+        logger.warning(f"Planner failed: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail="Planner failed to break down task into subqueries. Please try again with a more detailed/contextualized prompt")
 
 def researcher_agent(subtasks: list) -> ResearchResult:
     results = []
@@ -179,9 +184,11 @@ def orchestrator(user_query: str, request_id: str) -> dict:
         final_report = writer_agent(user_query, research)
         logger.info(f"[{request_id}] Writer generated report")
         return {"status": "success", "research": research.model_dump(), "final_report": final_report}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[{request_id}] Orchestration failed: {e}")
-        return {"status": "failed", "error": "Something went wrong"}
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/health")
 async def health():
