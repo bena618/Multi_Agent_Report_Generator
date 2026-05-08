@@ -5,4 +5,4 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
-    pythonVersion: 3.11.9
+    runtime: python-3.11.9
