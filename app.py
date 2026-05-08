@@ -50,6 +50,8 @@ class ResearchResult(BaseModel):
 class FinalReport(BaseModel):
     report: str
 
+class PlannerError(Exception):
+    pass
 
 def validate_input(user_input: str) -> tuple[bool, str]:
     if not user_input or not user_input.strip():
