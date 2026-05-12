@@ -4,4 +4,4 @@ python-dotenv==1.0.1
 ibm-watsonx-ai>=1.0.0
 upstash-redis>=1.0.0
 pydantic==2.5.0
-langgraph>=1.1.10,>2.0.0
+langgraph>=1.1.10,<2.0.0
