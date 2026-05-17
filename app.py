@@ -1,10 +1,11 @@
+import asyncio
+import aiohttp
 import os
 import json
 import logging
 import re
 import time
 import uuid
-import asyncio
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -34,7 +35,7 @@ MODEL_ID = "mistralai/mistral-small-3-1-24b-instruct-2503"
 credentials = {"url": IBM_URL, "apikey": IBM_API_KEY}
 
 PLANNER_PARAMS = {GenParams.MAX_NEW_TOKENS: 400, GenParams.TEMPERATURE: 0.1}
-WRITER_PARAMS = {GenParams.MAX_NEW_TOKENS: 500, GenParams.TEMPERATURE: 0.7}
+WRITER_PARAMS = {GenParams.MAX_NEW_TOKENS: 800, GenParams.TEMPERATURE: 0.7}
 RESEARCHER_PARAMS = {GenParams.MAX_NEW_TOKENS: 200, GenParams.TEMPERATURE: 0.3}
 
 class ResearchQuery(BaseModel):
@@ -51,6 +52,8 @@ class PlannerOutput(BaseModel):
 class ResearchItem(BaseModel):
     answer: str = Field(...)
     source: str = Field(...)
+    verified: Optional[bool] = Field(default=None)
+    verification: Optional[List[Dict[str, str]]] = Field(default=None)
 
 class PlannerError(Exception):
     pass
@@ -59,7 +62,7 @@ class AgentState(TypedDict):
     query: str
     request_id: str
     planner_output: Optional[Dict[str, Any]]
-    research_results: Optional[Dict[int, ResearchItem]]
+    research_results: Optional[Dict[int, Dict[str, Any]]]
     final_report: Optional[str]
 
 def validate_input(user_input: str) -> tuple[bool, str]:
@@ -102,7 +105,7 @@ def sanitize_response(response: str) -> str:
     text = str(response)
     text = text.replace("\x00", "")
     text = text.replace('\\t', '\t').replace('\\r', '\r').replace('\\n', '\n')
-    max_len = 2100
+    max_len = WRITER_PARAMS[GenParams.MAX_NEW_TOKENS] * 5
     if len(text) > max_len:
         text = text[:max_len] + "\n\n[Response truncated]"
     return text.strip()
@@ -189,7 +192,6 @@ async def run_single_researcher(
     request_id: str, 
     previous_results: List[ResearchItem] = None
 ) -> ResearchItem:
-    """Run a single research task with optional structured context from previous subtasks"""
     logger.info(f"[{request_id}] Researching: {task[:50]}...")
     
     system_prompt = """
@@ -216,6 +218,29 @@ async def run_single_researcher(
         return ResearchItem.model_validate_json(response)
     except:
         return ResearchItem(answer=response, source="LLM (no external source)")
+
+async def fact_checker_node(state: AgentState) -> AgentState:
+
+    research_results = state["research_results"]
+
+    if not research_results:
+        return state
+    
+    verified_results={}
+    for subtask_id, item in research_results.items():
+        is_supported, sources = await verify_claim_with_search(item["answer"])
+        item["verified"] = is_supported
+        item["verification"] = sources
+        if is_supported:
+            logger.info(f"[{state['request_id']}] Subtask {subtask_id} verified: {item['answer'][:100]}")
+        elif is_supported is False:
+            logger.warning(f"[{state['request_id']}] Subtask {subtask_id} not verified: {item['answer'][:100]}")
+        else:
+            logger.warning(f"[{state['request_id']}] Subtask {subtask_id} verification error: {item['answer'][:100]}")
+        verified_results[subtask_id] = item
+
+
+    return {**state, "research_results": verified_results}
 
 async def execute_dependent_subtasks(planner_output: PlannerOutput, request_id: str) -> Dict[int, ResearchItem]:
     """Execute subtasks respecting dependencies, passing structured context from completed subtasks"""
@@ -252,6 +277,62 @@ async def execute_dependent_subtasks(planner_output: PlannerOutput, request_id: 
    
     return results
 
+async def verify_claim_with_search(claim: str) -> tuple[Optional[bool], List[Dict[str, str]]]:
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    cx = os.getenv("GOOGLE_CX")
+
+    if not api_key or not cx:
+        logger.warning("Google API key or CX not configured")
+        return None, []
+    
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": api_key,
+        "cx": cx,
+        "q": claim,
+        "num": 3
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            try:
+                if response.status != 200:
+                    logger.error(f"Search failed with status {response.status}")
+                    return None, []
+                data = await response.json()
+                
+                items = data.get("items")
+                if not items:
+                    return False, []
+
+                sources = [{"snippet": item["snippet"], "link": item["link"]} for item in items[:3]]                
+                context = "\n".join([s["snippet"] for s in sources])
+                
+                system_prompt = """You are a strict fact-checker classifier.
+                Your only job is to determine if the claim is supported by the provided evidence.
+                Respond with exactly one word: SUPPORTED, REFUTED, or UNVERIFIABLE.
+                
+                Do not inclclude any othe text,explanation,punction, or output other than the single word."""
+                
+                user_content = f"""
+                Claim: {claim}\n\n
+                Evidence: \n{context}
+                """
+                response = call_llm(system_prompt,user_content,params = {GenParams.TEMPERATURE:0.2},sanitize=False)
+
+                verdict = response.strip().upper()
+                if verdict == "SUPPORTED":
+                    return True, sources
+                elif verdict == "REFUTED":
+                    return False, sources
+                else:
+                    return None, sources
+            except Exception as e:
+                logger.error(f"Search failed: {e}")
+                return None, []
+
+
 def writer_agent(user_query: str, research_results: Dict[int, ResearchItem], subtasks: List[SubtaskDependency]) -> str:
     """Generate final report from research results preserving all sources"""
     # Order by original subtask order
@@ -268,6 +349,9 @@ def writer_agent(user_query: str, research_results: Dict[int, ResearchItem], sub
 
     If the answer to the query is a simple fact or other straightforward information, 
     do not overcomplicate the response to get to paragraph length, just answer the question directly.
+
+    Otherwise, provide a comprehensive response with multiple paragraphs and make sure that the users original query is answered in full,
+    if possible, otherwise state the research thats you were able to find on the topic and explain why the query could not be fully answered.
     """
     user_content = f"Original query: {user_query}\n\nResearch with sources:\n{research_text}"
     return call_llm(system_prompt, user_content, WRITER_PARAMS, sanitize=True)
@@ -296,11 +380,13 @@ async def writer_node(state: AgentState) -> AgentState:
 builder = StateGraph(AgentState)
 builder.add_node("planner", planner_node)
 builder.add_node("researcher", researcher_node)
+builder.add_node("fact_checker", fact_checker_node)
 builder.add_node("writer", writer_node)
 
 builder.set_entry_point("planner")
 builder.add_edge("planner", "researcher")
-builder.add_edge("researcher", "writer")
+builder.add_edge("researcher", "fact_checker")
+builder.add_edge("fact_checker", "writer")
 builder.add_edge("writer", END)
 
 graph = builder.compile()
@@ -321,7 +407,7 @@ async def run_agent_graph(query: str, request_id: str) -> dict:
         for sub in planner_output.subtasks:
             if sub.id in final_state["research_results"]:
                 result = final_state["research_results"][sub.id]
-                research_list.append({"answer": result["answer"], "source": result["source"]})
+                research_list.append({"answer": result["answer"], "source": result["source"], "verified": result["verified"], "verification": result["verification"]})
    
     return {
         "status": "success",
