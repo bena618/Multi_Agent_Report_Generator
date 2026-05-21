@@ -38,6 +38,22 @@ PLANNER_PARAMS = {GenParams.MAX_NEW_TOKENS: 400, GenParams.TEMPERATURE: 0.1}
 WRITER_PARAMS = {GenParams.MAX_NEW_TOKENS: 800, GenParams.TEMPERATURE: 0.7}
 RESEARCHER_PARAMS = {GenParams.MAX_NEW_TOKENS: 200, GenParams.TEMPERATURE: 0.3}
 
+_model_cache = {}
+
+def get_model(params: dict=None):
+    if params is None:
+        params = PLANNER_PARAMS
+    cache_key = tuple(sorted(params.items()))
+    if cache_key not in _model_cache:
+        logger.info(f"Creating new model with params: {params}")
+        _model_cache[cache_key] = ModelInference(
+            model_id=MODEL_ID,
+            params=params,
+            credentials=credentials,
+            project_id=IBM_PROJECT_ID
+        )
+    return _model_cache[cache_key]
+
 class ResearchQuery(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
 
@@ -112,12 +128,7 @@ def sanitize_response(response: str) -> str:
 
 def call_llm(system_prompt: str, user_content: str, params: dict = None, sanitize: bool = True) -> str:
     try:
-        model = ModelInference(
-            model_id=MODEL_ID,
-            credentials=credentials,
-            project_id=IBM_PROJECT_ID,
-            params=params
-        )
+        model = get_model(params)
         full_prompt = system_prompt + "\n\nUser request: " + user_content + "\n\nResponse:"
         logger.info(f"LLM call initiated - Prompt length: {len(full_prompt)}")
         response = model.generate_text(prompt=full_prompt)
@@ -159,13 +170,19 @@ def planner_agent(user_query: str) -> PlannerOutput:
 
     CRITICAL RULES:
     - Each subtask MUST have a unique numeric id (1, 2, 3, ...)
-    - "depends_on" is a list of ids that this subtask needs BEFORE it can run
-    - If a subtask has no dependencies, use an empty list []
-    - Base dependencies on logical flow and information hierarchy/need, not any specific pattern
-    - Do not force comparison structure or anything that may force dependencies if the user's query doesn't require it, such as a simple fact query
-    - Do not include any other text or explanation outside the JSON
+    - "depends_on" must contain only ids of subtasks whose answers are strictly required to answer the current subtask.
+    - Use depends_on only when the current subtask cannot be answered independently without the earlier subtask.
+    - Do NOT add a dependency just because two subtasks are related, in the same topic, or in a natural reading order.
+    - If a subtask can be answered as a standalone search, use an empty list [].
+    - Base dependencies on true information prerequisites, not stylistic ordering.
+    - Do not force a comparison structure or linear chain unless the user explicitly requires it.
+    - For report generation, create as many useful subtasks as needed, but only use dependencies for true prerequisites.
+    - Do not make a general overview task the parent of every detail task unless the later tasks explicitly need that overview.
+    - A subtask may be thematically related to another without depending on it
+    - Do not infer prerequisite tasks unless the user's wording makes them necessary to answer the current subtask
+    - Do not include any other text or explanation outside the JSON.
 
-    Now please analyse the user's query and break it down into appropriate subtasks with dependencies:
+    Now please analyze the user's query and break it down into appropriate subtasks with dependencies.
     """
     response = call_llm(system_prompt, user_query, PLANNER_PARAMS, sanitize=False)
     logger.info(f"Planner response: {response[:500]}")
@@ -226,9 +243,15 @@ async def fact_checker_node(state: AgentState) -> AgentState:
     if not research_results:
         return state
     
+    tasks = []
+    for item in research_results.values():
+        tasks.append(verify_claim_with_search(item["answer"]))
+    
+    verification_results = await asyncio.gather(*tasks)
+    
+
     verified_results={}
-    for subtask_id, item in research_results.items():
-        is_supported, sources = await verify_claim_with_search(item["answer"])
+    for (subtask_id, item), (is_supported, sources) in zip(research_results.items(), verification_results):
         item["verified"] = is_supported
         item["verification"] = sources
         if is_supported:
@@ -262,17 +285,15 @@ async def execute_dependent_subtasks(planner_output: PlannerOutput, request_id: 
             dep_strings = [f"{sub.id}: depends on {sub.depends_on}" for sub in planner_output.subtasks if sub.id in remaining]
             raise Exception(f"Circular dependency detected among {remaining}. Dependencies: {dep_strings}")
        
+        tasks = []
         # For each ready subtask, collect structured previous results
         for sub in ready:
-            previous_results = []
-            if sub.depends_on:
-                for dep_id in sub.depends_on:
-                    if dep_id in results:
-                        previous_results.append(results[dep_id])
-                logger.info(f"[{request_id}] Subtask {sub.id} depends on {sub.depends_on}, passing {len(previous_results)} previous result(s)")
-            
-            # Run researcher with structured previous results
-            results[sub.id] = await run_single_researcher(sub.task, request_id, previous_results if previous_results else None)
+            previous_results = [results[dep_id] for dep_id in sub.depends_on if dep_id in results]
+            tasks.append(run_single_researcher(sub.task, request_id, previous_results if previous_results else None))
+        tasks_results = await asyncio.gather(*tasks)
+
+        for sub, result in zip(ready, tasks_results):
+            results[sub.id] = result
             completed.add(sub.id)
    
     return results
@@ -333,7 +354,7 @@ async def verify_claim_with_search(claim: str) -> tuple[Optional[bool], List[Dic
                 return None, []
 
 
-def writer_agent(user_query: str, research_results: Dict[int, ResearchItem], subtasks: List[SubtaskDependency]) -> str:
+def writer_agent(user_query: str, research_results: Dict[int, Dict], subtasks: List[SubtaskDependency]) -> str:
     """Generate final report from research results preserving all sources"""
     # Order by original subtask order
     ordered_items = []
